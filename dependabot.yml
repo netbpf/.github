@@ -1,0 +1,160 @@
+# Configuration for Dependabot (https://docs.github.com/code-security/dependabot)
+
+version: 2
+updates:
+  # Enable version updates for GitHub Actions
+  - package-ecosystem: "github-actions"
+    # Look for `.github/workflows` in the `root` directory
+    directory: "/"
+    # Check for updates to GitHub Actions every weekday
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    # Assign reviewers for PRs
+    reviewers:
+      - "@netbpf/security"
+    # Add labels to PRs
+    labels:
+      - "dependencies"
+      - "github-actions"
+    # Only allow updates to the lockfile for security updates
+    versioning-strategy: "lockfile-only"
+
+  # Enable version updates for Go modules
+  - package-ecosystem: "gomod"
+    # Look for `go.mod` in the `root` directory
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+    reviewers:
+      - "@netbpf/security"
+    labels:
+      - "dependencies"
+      - "go"
+    # Allow updates for patch and minor version updates
+    versioning-strategy: "increase"
+
+  # Enable version updates for npm
+  - package-ecosystem: "npm"
+    # Look for `package.json` and `package-lock.json` in the `root` directory
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+    reviewers:
+      - "@netbpf/security"
+    labels:
+      - "dependencies"
+      - "javascript"
+    # Update both package.json and package-lock.json
+    versioning-strategy: "lockfile-only"
+    # Group updates for similar dependencies
+    groups:
+      production:
+        update-types: ["version-update:semver-patch", "version-update:semver-minor"]
+        patterns: ["*"]
+      dev-dependencies:
+        update-types: ["version-update:semver-patch", "version-update:semver-minor"]
+        patterns: ["*dev*", "*test*"]
+
+  # Enable version updates for Python
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "thursday"
+    reviewers:
+      - "@netbpf/security"
+    labels:
+      - "dependencies"
+      - "python"
+    versioning-strategy: "increase"
+    groups:
+      production:
+        update-types: ["version-update:semver-patch", "version-update:semver-minor"]
+        patterns: ["*"]
+      dev-dependencies:
+        update-types: ["version-update:semver-patch", "version-update:semver-minor"]
+        patterns: ["*dev*", "*test*"]
+
+  # Enable version updates for Docker
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "friday"
+    reviewers:
+      - "@netbpf/security"
+    labels:
+      - "dependencies"
+      - "docker"
+    # Only update the digest
+    versioning-strategy: "lockfile-only"
+
+  # Configuration for security updates (runs daily)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    # Only create pull requests for security updates
+    open-pull-requests-limit: 10
+    labels:
+      - "security"
+      - "dependencies"
+    # Allow any version updates that fix security vulnerabilities
+    versioning-strategy: "auto"
+    # Add security team as reviewers
+    reviewers:
+      - "@netbpf/security"
+    # Assign to security team
+    assignees:
+      - "@netbpf/security"
+
+# Global configuration for all package managers
+defaults:
+  # Automatically approve minor and patch updates
+  auto-approve:
+    # Only auto-approve non-major version updates
+    update-types: ["version-update:semver-patch", "version-update:semver-minor"]
+  # Add a comment to PRs with dependency update details
+  commit-message:
+    prefix: "chore"
+    include: "scope"
+  # Rebase strategy for PRs
+  rebase-strategy: "auto"
+  # Maximum number of open PRs for version updates
+  open-pull-requests-limit: 5
+  # Milestone to add to PRs (if needed)
+  # milestone: 1
+
+# Ignore specific dependencies or versions
+dependency-updates:
+  # Ignore major version updates for now
+  ignore:
+    - dependency-name: "*"
+      update-types: ["version-update:semver-major"]
+    # Add specific dependencies to ignore
+    # - dependency-name: "express"
+    #   versions: ["4.x", "5.x"]
+    # - dependency-name: "react"
+    #   versions: ["17.x"]
+
+# Security updates configuration
+security-updates:
+  # Enable security updates
+  enabled: true
+  # Run security updates daily
+  schedule:
+    interval: "daily"
+  # Apply security updates to all package managers
+  package-ecosystems: ["github-actions", "gomod", "npm", "pip", "docker"]
+  # Create pull requests for security updates
+  pull-request-branch-name:
+    separator: "-"
+  # Add security labels
+  labels: ["security", "dependencies"]
+  # Add security team as reviewers
+  reviewers: ["@netbpf/security"]
+  # Assign to security team
+  assignees: ["@netbpf/security"]

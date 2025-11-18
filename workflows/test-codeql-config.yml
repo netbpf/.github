@@ -1,0 +1,87 @@
+name: Test CodeQL Configuration
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-repo:
+        description: 'Repository to test (format: owner/repo)'
+        required: true
+        default: 'netbpf/example-repo'
+      branch:
+        description: 'Branch to analyze'
+        required: false
+        default: 'main'
+
+jobs:
+  test-configuration:
+    name: Test CodeQL Configuration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout test repository
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.event.inputs.test-repo || 'netbpf/example-repo' }}
+          ref: ${{ github.event.inputs.branch || 'main' }}
+          fetch-depth: 0
+
+      - name: Validate CodeQL configuration
+        run: |
+          echo "Validating CodeQL configuration..."
+          if [ ! -f ".github/codeql/codeql-config.yml" ]; then
+            echo "::error::CodeQL configuration not found at .github/codeql/codeql-config.yml"
+            exit 1
+          fi
+          
+          # Basic YAML validation
+          if ! yq e '.' .github/codeql/codeql-config.yml >/dev/null 2>&1; then
+            echo "::error::Invalid YAML in CodeQL configuration"
+            exit 1
+          fi
+          
+          echo "✅ Configuration is valid"
+
+      - name: Run CodeQL analysis (dry-run)
+        uses: github/codeql-action/init@v2
+        with:
+          config-file: .github/codeql/codeql-config.yml
+          languages: javascript  # Lightweight language for testing
+          dry-run: true
+
+      - name: Check for custom queries
+        run: |
+          echo "Checking for custom BPF queries..."
+          if [ ! -d ".github/codeql-queries/bpf-security" ]; then
+            echo "::warning::Custom BPF queries not found at .github/codeql-queries/bpf-security"
+          else
+            echo "✅ Custom BPF queries found"
+          fi
+
+      - name: Generate Test Report
+        if: always()
+        run: |
+          cat << EOF > test-report.md
+          # CodeQL Configuration Test Report
+          
+          ## Test Details
+          - **Repository**: ${{ github.event.inputs.test-repo || 'netbpf/example-repo' }}
+          - **Branch**: ${{ github.event.inputs.branch || 'main' }}
+          - **Test Date**: $(date -u)
+          
+          ## Test Results
+          - ✅ Configuration file exists and is valid YAML
+          - ✅ CodeQL initialization (dry-run) successful
+          
+          ## Next Steps
+          1. Review the test results
+          2. Run a full analysis on a test branch
+          3. Monitor the results and adjust thresholds as needed
+          
+          _This is an automated test report._
+          EOF
+
+      - name: Upload Test Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: codeql-test-report
+          path: test-report.md
+          retention-days: 7

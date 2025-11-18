@@ -1,0 +1,233 @@
+name: GitOps Sync
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'clusters/**'
+      - 'apps/**'
+      - 'infrastructure/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'clusters/**'
+      - 'apps/**'
+      - 'infrastructure/**'
+  schedule:
+    - cron: '0 * * * *'  # Hourly sync to detect and correct drift
+  workflow_dispatch:  # Allow manual triggering
+
+# Environment variables
+env:
+  ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+  ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+  KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+  ENVIRONMENT: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
+
+# Job definitions
+jobs:
+  validate-manifests:
+    name: Validate Kubernetes Manifests
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.24.0'
+
+    - name: Set up kustomize
+      uses: imranismail/setup-kustomize@v2
+      with:
+        kustomize-version: 'v4.5.7'
+
+    - name: Validate Kubernetes Manifests
+      run: |
+        # Validate all Kubernetes manifests
+        find . -type f -name "*.yaml" -o -name "*.yml" | grep -v -E "kustomization\.ya?ml$" | while read file; do
+          echo "Validating $file"
+          kubectl apply --dry-run=server -f "$file" || exit 1
+        done
+
+        # Validate kustomize builds
+        find . -name kustomization.y*ml | while read kfile; do
+          echo "Validating kustomize build in $(dirname "$kfile")"
+          kustomize build "$(dirname "$kfile")" | kubectl apply --dry-run=server -f - || exit 1
+        done
+
+  sync-argocd:
+    name: Sync ArgoCD Applications
+    needs: validate-manifests
+    if: github.event_name != 'pull_request'  # Only run on push to main or workflow_dispatch
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.24.0'
+
+    - name: Configure kubeconfig
+      run: |
+        mkdir -p ~/.kube
+        echo "$KUBE_CONFIG" > ~/.kube/config
+        chmod 600 ~/.kube/config
+
+    - name: Install ArgoCD CLI
+      run: |
+        curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+        sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+        rm argocd-linux-amd64
+
+    - name: Login to ArgoCD
+      run: |
+        argocd login ${{ env.ARGOCD_SERVER }} \
+          --username admin \
+          --password ${{ env.ARGOCD_AUTH_TOKEN }} \
+          --grpc-web
+
+    - name: Get modified applications
+      id: changed-files
+      uses: tj-actions/changed-files@v34
+      with:
+        files: |
+          apps/**
+          infrastructure/**
+          clusters/**
+
+    - name: Sync changed applications
+      if: steps.changed-files.outputs.any_changed == 'true'
+      run: |
+        # Get list of all ArgoCD applications
+        APPS=$(argocd app list -o name)
+        
+        # For each changed file, find and sync the corresponding application
+        for file in ${{ steps.changed-files.outputs.all_changed_files }}; do
+          # Extract app name from path (simplified example)
+          APP_NAME=$(echo "$file" | grep -oP 'apps/\K[^/]+' | head -1)
+          
+          if [ -n "$APP_NAME" ] && echo "$APPS" | grep -q "^$APP_NAME$"; then
+            echo "Syncing application: $APP_NAME"
+            argocd app sync "$APP_NAME" --prune --force
+            
+            # Wait for sync to complete with timeout
+            argocd app wait "$APP_NAME" --health-check --timeout 300
+          fi
+        done
+
+    - name: Sync all applications (if no specific changes detected)
+      if: steps.changed-files.outputs.any_changed != 'true' && github.event_name == 'workflow_dispatch'
+      run: |
+        echo "No specific changes detected, syncing all applications"
+        argocd app list -o name | while read app; do
+          echo "Syncing $app"
+          argocd app sync "$app" --prune
+          argocd app wait "$app" --health-check --timeout 300
+        done
+
+  notify:
+    name: Notify Status
+    needs: sync-argocd
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+    - name: Send Slack Notification
+      uses: rtCamp/action-slack-notify@v2
+      env:
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        SLACK_COLOR: ${{ job.status == 'success' && 'good' || 'danger' }}
+        SLACK_TITLE: 'GitOps Sync ${{ job.status == 'success' && 'Succeeded' : 'Failed' }}'
+        SLACK_MESSAGE: |
+          *Repository*: ${{ github.repository }}
+          *Branch*: ${{ github.ref_name }}
+          *Commit*: <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${GITHUB_SHA:0:8}>
+          *Workflow*: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|${{ github.workflow }}>
+          *Status*: ${{ job.status == 'success' && '✅ Success' : '❌ Failed' }}
+        MSG_MINIMAL: false
+
+# Security and compliance checks
+security:
+  # Ensure all container images are scanned for vulnerabilities
+  container-scanning:
+    enabled: true
+    severity-threshold: high
+  
+  # Check for secrets in code
+  secret-scanning:
+    enabled: true
+    
+  # Ensure all infrastructure changes are reviewed
+  code-review-required: true
+  required-approvals: 1
+  
+  # Enforce branch protection
+  branch-protection:
+    required: true
+    enforce-admins: true
+    required-pull-request-reviews:
+      required-approving-review-count: 1
+      require-code-owner-reviews: true
+    restrictions:
+      users: []
+      teams:
+        - netbpf/security
+        - netbpf/devops
+
+# Performance optimizations
+performance:
+  # Cache dependencies to speed up builds
+  cache:
+    enabled: true
+    paths:
+      - ~/.kube/cache
+      - ~/.kube/http-cache
+  
+  # Parallel job execution
+  max-parallel: 3
+  
+  # Timeout settings
+  timeout-minutes: 30
+
+# Monitoring and observability
+monitoring:
+  # Track deployment metrics
+  metrics:
+    enabled: true
+    prometheus:
+      url: ${{ secrets.PROMETHEUS_URL }}
+  
+  # Log all workflow executions
+  logging:
+    level: debug
+    retention-days: 90
+
+# Documentation references
+documentation:
+  gitops-policy: .github/policies/operations/gitops-policy.md
+  security-policy: .github/policies/security/README.md
+  runbook: .github/RUNBOOK.md
+
+# Maintenance and support
+maintenance:
+  # Schedule for reviewing and updating this workflow
+  review-schedule: monthly
+  
+  # Contact information for support
+  support:
+    email: gitops-support@netbpf.com
+    slack: #netbpf-gitops
+    
+  # On-call rotation information
+  oncall:
+    schedule: 
+      - name: Primary
+        email: oncall-primary@netbpf.com
+      - name: Secondary
+        email: oncall-secondary@netbpf.com

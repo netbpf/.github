@@ -1,0 +1,137 @@
+name: "NETBPF CodeQL Security Scanning"
+
+# Global configuration
+disable-default-queries: false
+disable-local-queries: false
+
+# Language-specific configurations
+extractor:
+  go:
+    build-command: |
+      # Build command for Go projects
+      GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+      go build -v -tags=netgo -ldflags="-s -w" ./...
+    environment:
+      # Enable module support
+      GO111MODULE: "on"
+      # Disable CGO for more reproducible builds
+      CGO_ENABLED: "0"
+
+# Query configuration
+queries:
+  # Use security-and-quality suite (recommended by GitHub)
+  - uses: security-and-quality
+    with:
+      # Only include security queries
+      tags: security
+      # Exclude experimental queries
+      exclude-tags: experimental
+      # Include security-extended for more coverage
+      security-severity: error,warning,recommendation
+
+  # Custom BPF Security Queries
+  - name: BPF Security Checks
+    uses: ./.github/codeql-queries/bpf-security
+    with:
+      # Enable all severity levels for custom queries
+      security-severity: error,warning,recommendation,note
+
+  # Additional security queries
+  - name: Additional Security Queries
+    uses: github/codeql-go/ql/src/codeql-suites/go-security-and-quality.qls
+    with:
+      # Focus on high-impact security issues
+      include-tags: security
+      exclude-tags: experimental,performance
+
+# Path exclusions
+paths:
+  include:
+    - "**/*.go"
+    - "**/*.c"
+    - "**/*.h"
+  exclude:
+    - "**/test/**"
+    - "**/examples/**"
+    - "**/vendor/**"
+    - "**/third_party/**"
+    - "**/mocks/**"
+    - "**/testdata/**"
+    - "**/tmp/**"
+    - "**/dist/**"
+    - "**/build/**"
+
+# Query filters
+query-filters:
+  # Include all error and warning severity issues
+  - include:
+      problem.severity: error
+  - include:
+      problem.severity: warning
+  # Include high and critical security severity issues
+  - include:
+      security-severity: critical
+  - include:
+      security-severity: high
+  # Exclude recommendation and note level issues
+  - exclude:
+      problem.severity: recommendation
+  - exclude:
+      problem.severity: note
+
+# Custom query suites
+suites:
+  bpf-security:
+    - query-filters:
+        - include:
+            tags: security
+            precision: high
+    - query-filters:
+        - include:
+            id: /bpf-.*/
+
+# Performance optimization
+run:
+  threads: 0  # Use all available cores
+  memory: 0   # Use all available memory
+
+# Post-processing
+post-processing:
+  # Fail the build on critical security issues
+  fail-on:
+    - id: "go/insecure-tls"
+    - id: "go/command-line-injection"
+    - id: "go/path-injection"
+    - id: "bpf/memory-corruption"
+    - id: "bpf/privilege-escalation"
+
+# Output configuration
+output:
+  # Generate SARIF output for GitHub integration
+  sarif:
+    include-queries: true
+    include-paths: true
+    include-source: true
+  # Generate CSV report for further analysis
+  csv:
+    enabled: true
+    output-file: codeql-results.csv
+
+# Notifications
+notifications:
+  # Send alerts for high/critical findings
+  security-alerts:
+    enabled: true
+    level: high
+    # Send to security team email
+    email: security@netbpf.org
+
+# Schedule configuration
+schedule:
+  # Weekly full scan
+  - interval: "weekly"
+    day-of-week: "sunday"
+    time: "03:00"
+  # Daily incremental scan
+  - interval: "daily"
+    time: "01:00"

@@ -1,0 +1,122 @@
+# Contributor License Agreement (CLA) for NETBPF
+# Version: 1.0.0
+# Effective Date: 2025-11-18
+
+# CLA Configuration
+gitHubOrg: netbpf
+repositories:
+  - owner: netbpf
+    repo: .github
+  - owner: netbpf
+    repo: issues
+  - owner: netbpf
+    repo: community
+  - "*"  # Applies to all repositories in the organization
+
+template: |
+  # NETBPF Contributor License Agreement
+  
+  Thank you for your interest in contributing to NETBPF ("We" or "Us").
+  
+  This Contributor License Agreement ("Agreement") documents the rights granted by contributors to Us. To make this document effective, please sign by clicking the button below (if this is a new CLA) or log in to review the terms (if you've already signed).
+  
+  ## 1. Definitions
+  - "You" (or "Your") shall mean the copyright owner or legal entity authorized by the copyright owner that is making this Agreement with NETBPF.
+  - "Contribution" shall mean any original work of authorship, including any modifications or additions to an existing work, that is intentionally submitted by You to Us for inclusion in, or documentation of, any of the products owned or managed by Us.
+  
+  ## 2. Grant of Copyright License
+  Subject to the terms and conditions of this Agreement, You hereby grant to Us and to recipients of software distributed by Us a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable copyright license to reproduce, prepare derivative works of, publicly display, publicly perform, sublicense, and distribute Your Contributions and such derivative works.
+  
+  ## 3. Grant of Patent License
+  Subject to the terms and conditions of this Agreement, You hereby grant to Us and to recipients of software distributed by Us a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable (except as stated in this section) patent license to make, have made, use, offer to sell, sell, import, and otherwise transfer the Work, where such license applies only to those patent claims licensable by You that are necessarily infringed by Your Contribution(s) alone or by combination of Your Contribution(s) with the Work to which such Contribution(s) was submitted.
+  
+  ## 4. Certification
+  You represent that:
+  - You are legally entitled to grant the above license.
+  - If your employer has rights to intellectual property that you create, you have either (i) received permission from your employer to make the Contributions, or (ii) secured from your employer a waiver as to all rights in or to the Contributions.
+  - Each Contribution is Your original creation.
+  - You are not expected to provide support for Your Contributions, except to the extent You desire to provide support.
+  - You grant permission to list Your name and email as a contributor in the project's documentation.
+  
+  ## 5. Support
+  You are not expected to provide support for Your Contributions, except to the extent You desire to provide support. You may provide support for free, for a fee, or not at all.
+  
+  ## 6. No Warranty
+  Your Contributions are provided "as is" without warranty of any kind, whether express, implied, statutory, or otherwise.
+  
+  ## 7. Notice to NETBPF
+  You agree to notify NETBPF of any facts or circumstances of which you become aware that would make these representations inaccurate in any respect.
+  
+  ## 8. Governing Law
+  This Agreement shall be governed by and construed in accordance with the laws of the State of California, without regard to its conflict of laws provisions.
+  
+  ---
+  
+  By clicking "Sign" below, you agree to the terms of this Contributor License Agreement.
+
+# Signature requirements
+contributors:
+  - name: "Individual Contributors"
+    description: "For individual contributors"
+    agreement: "individual"
+    content: |
+      I certify that I have the right to submit this contribution and agree to the terms of the NETBPF Contributor License Agreement.
+  - name: "Corporate Contributors"
+    description: "For contributors acting on behalf of a company"
+    agreement: "corporate"
+    content: |
+      I am authorized to sign this agreement on behalf of my organization and agree to the terms of the NETBPF Contributor License Agreement on behalf of my organization.
+
+# CLA Assistant Configuration
+path: "**/CLA.md"
+branch: "main"
+
+# Pull Request Configuration
+prComment: >
+  Thank you for your pull request! Before we can look at your contribution, we need you to sign our Contributor License Agreement (CLA).
+  
+  - [ ] I have read the [Contributor License Agreement](https://github.com/netbpf/.github/blob/main/CLA.md)
+  - [ ] I have signed the [Contributor License Agreement](https://github.com/netbpf/.github/blob/main/CLA.md)
+  
+  *If you need help, please contact [legal@netbpf.org](mailto:legal@netbpf.org)*
+
+# Automatic CLA checking
+checkOn:
+  pull_request: true
+  push: true
+  status: true
+
+# Required checks
+required:
+  - signed
+  - emailMatchesGit
+  - nameProvided
+
+# Automatic updates
+autoUpdate:
+  enabled: true
+  branch: "update-cla"
+  commitMessage: "docs: update CLA signatures [skip ci]"
+  title: "Update CLA signatures"
+  body: "This PR updates the CLA signatures list."
+
+# Notifications
+notifications:
+  signed:
+    email:
+      subject: "NETBPF CLA Signed"
+      body: "Thank you for signing the NETBPF Contributor License Agreement!"
+  updated:
+    email:
+      subject: "NETBPF CLA Updated"
+      body: "The NETBPF CLA has been updated. Please review and sign again."
+
+# Legal Contact
+legalContact: legal@khulnasoft.com
+legalTeam: KhulnaSoft Legal Department
+
+# Versioning
+version: 1.2.0
+
+# Schema Validation
+$schema: "https://json-schema.org/draft/2020-12/schema"

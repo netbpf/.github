@@ -1,0 +1,283 @@
+name: "CodeQL Security Analysis"
+
+on:
+  push:
+    branches: [ "main", "master", "develop" ]
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.txt'
+      - '**/docs/**'
+  pull_request:
+    branches: [ "**" ]
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.txt'
+      - '**/docs/**'
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly on Sunday
+  workflow_dispatch:  # Allow manual triggering
+
+# Environment variables
+env:
+  CODEQL_CONFIG: .github/codeql/codeql-config.yml
+  # Security thresholds
+  CRITICAL_SEVERITY: 0
+  HIGH_SEVERITY: 2
+  MEDIUM_SEVERITY: 5
+  # Notification settings
+  NOTIFY_SLACK: ${{ secrets.SLACK_WEBHOOK_URL }}
+  SECURITY_TEAM: "@security-team"
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+      pull-requests: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'go', 'cpp', 'javascript', 'python' ]
+        include:
+          - language: 'go'
+            os: 'ubuntu-latest'
+            build-cmd: 'go build -v -tags=netgo ./...'
+          - language: 'cpp'
+            os: 'ubuntu-latest'
+            build-cmd: 'make -j4'
+          - language: 'javascript'
+            os: 'ubuntu-latest'
+            build-cmd: 'npm ci && npm run build --if-present'
+          - language: 'python'
+            os: 'ubuntu-latest'
+            build-cmd: 'pip install -e .'
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+        submodules: recursive
+
+    # Setup language-specific environments
+    - name: Set up Go
+      if: matrix.language == 'go'
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+        check-latest: true
+        cache: true
+        cache-dependency-path: '**/go.sum'
+
+    - name: Set up Node.js
+      if: matrix.language == 'javascript'
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: '**/package-lock.json'
+
+    - name: Set up Python
+      if: matrix.language == 'python'
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+        cache-dependency-path: '**/requirements.txt'
+
+    - name: Set up C/C++ build tools
+      if: matrix.language == 'cpp'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential llvm clang cmake
+
+    # Initialize CodeQL
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v2
+      with:
+        languages: ${{ matrix.language }}
+        config-file: ${{ env.CODEQL_CONFIG }}
+        debug: true
+        ram: 8192
+        threads: 2
+        tool-cache: ${{ runner.tool_cache }}
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    # Custom build command for each language
+    - name: Build with ${{ matrix.language }}
+      run: ${{ matrix.build-cmd }}
+      continue-on-error: true
+
+    # Run CodeQL analysis
+    - name: Perform CodeQL Analysis
+      id: analysis
+      uses: github/codeql-action/analyze@v2
+      with:
+        category: "/language:${{ matrix.language }}"
+        output: results
+        output-format: sarif-latest,csv
+        upload-database: true
+        debug: true
+
+    # Upload SARIF results
+    - name: Upload SARIF results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: results/results.sarif
+        check_name: "CodeQL / ${{ matrix.language }}"
+        upload-results: true
+
+    # Custom Security Checks
+    - name: Run Custom Security Checks
+      if: always()
+      run: |
+        echo "Running custom security checks..."
+        # Check for hardcoded secrets
+        if [ -f "results/results.sarif" ]; then
+          echo "Checking for secrets..."
+          # This is a simplified example - consider using gitleaks or similar
+          if grep -r "password|secret|key|token" --include="*.{go,js,py,cpp,h}" --exclude-dir={vendor,node_modules} .; then
+            echo "::warning::Potential secrets found in code"
+            echo "SECRETS_FOUND=true" >> $GITHUB_ENV
+          fi
+        fi
+
+        # Check for outdated dependencies
+        if [ "${{ matrix.language }}" = "javascript" ] && [ -f "package.json" ]; then
+          echo "Checking for outdated npm packages..."
+          npm outdated --json > npm-audit.json || true
+        fi
+
+    # Post-processing and reporting
+    - name: Process and Report Results
+      if: always()
+      id: report
+      run: |
+        echo "Processing analysis results..."
+        
+        # Initialize variables
+        CRITICAL_COUNT=0
+        HIGH_COUNT=0
+        MEDIUM_COUNT=0
+        
+        # Parse SARIF results if they exist
+        if [ -f "results/results.sarif" ]; then
+          echo "Parsing SARIF results..."
+          # Use jq to extract severity counts
+          # This requires jq to be installed in the runner
+          sudo apt-get install -y jq
+          
+          CRITICAL_COUNT=$(jq -r '.runs[].results[] | select(.level == "error") | .ruleId' results/results.sarif | wc -l)
+          HIGH_COUNT=$(jq -r '.runs[].results[] | select(.level == "warning") | .ruleId' results/results.sarif | wc -l)
+          MEDIUM_COUNT=$(jq -r '.runs[].results[] | select(.level == "note") | .ruleId' results/results.sarif | wc -l)
+          
+          echo "Critical issues: $CRITICAL_COUNT"
+          echo "High issues: $HIGH_COUNT"
+          echo "Medium issues: $MEDIUM_COUNT"
+          
+          # Export for other steps
+          echo "CRITICAL_COUNT=$CRITICAL_COUNT" >> $GITHUB_ENV
+          echo "HIGH_COUNT=$HIGH_COUNT" >> $GITHUB_ENV
+          echo "MEDIUM_COUNT=$MEDIUM_COUNT" >> $GITHUB_ENV
+          
+          # Generate markdown report
+          cat << EOF > security-report.md
+          # Security Scan Report
+          
+          ## Summary
+          - 🚨 **Critical**: $CRITICAL_COUNT
+          - 🔴 **High**: $HIGH_COUNT
+          - 🟠 **Medium**: $MEDIUM_COUNT
+          
+          ## Next Steps
+          - Review the full report in the GitHub Security tab
+          - Address critical and high severity issues immediately
+          - Review medium severity issues in the next sprint
+          
+          _Generated on $(date)_
+          EOF
+          
+          # Upload report as artifact
+          echo "REPORT_PATH=security-report.md" >> $GITHUB_ENV
+        fi
+
+    # Upload security report as artifact
+    - name: Upload Security Report
+      if: always() && env.REPORT_PATH
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-report-${{ matrix.language }}
+        path: ${{ env.REPORT_PATH }}
+        retention-days: 7
+
+    # Comment on PR with security findings
+    - name: Comment on PR
+      if: github.event_name == 'pull_request' && (env.CRITICAL_COUNT > 0 || env.HIGH_COUNT > 0)
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('security-report.md', 'utf8');
+          
+          await github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## 🔍 Security Analysis Results\n${report}\n\n**Action Required**: Please review the security findings before merging.`
+          });
+
+    # Fail the workflow if critical issues exceed threshold
+    - name: Check Security Thresholds
+      if: env.CRITICAL_COUNT > env.CRITICAL_SEVERITY || env.HIGH_COUNT > env.HIGH_SEVERITY
+      run: |
+        echo "🚨 Security thresholds exceeded!"
+        echo "Critical issues: $CRITICAL_COUNT (max: $CRITICAL_SEVERITY)"
+        echo "High issues: $HIGH_COUNT (max: $HIGH_SEVERITY)"
+        exit 1
+
+    # Send Slack notification for critical findings
+    - name: Slack Notification
+      if: failure() && env.CRITICAL_COUNT > 0 && env.NOTIFY_SLACK != ''
+      uses: slackapi/slack-github-action@v1.23.0
+      with:
+        payload: |
+          {
+            "blocks": [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "🚨 *Security Alert*: ${{ github.repository }} - ${{ github.ref_name }}"
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": `*Critical Issues*\n${process.env.CRITICAL_COUNT} found (max: ${process.env.CRITICAL_SEVERITY})`
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": `*High Issues*\n${process.env.HIGH_COUNT} found (max: ${process.env.HIGH_SEVERITY})`
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Build*\n<https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow>"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Commit*\n<https://github.com/${{ github.repository }}/commit/${{ github.sha }}|${process.env.GITHUB_SHA:0:7}>"
+                  }
+                ]
+              }
+            ]
+          }
+      env:
+        SLACK_WEBHOOK_URL: ${{ env.NOTIFY_SLACK }}
+        SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

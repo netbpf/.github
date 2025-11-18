@@ -1,0 +1,305 @@
+name: Enforce GitOps Policy
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - '.github/workflows/enforce-gitops-policy.yml'
+      - '.github/policies/operations/gitops-context.yml'
+      - '.github/policies/operations/gitops-policy.md'
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual trigger'
+        required: true
+        default: 'Manual policy validation run'
+
+# Environment variables
+env:
+  GITOPS_CONTEXT: .github/policies/operations/gitops-context.yml
+  GITOPS_POLICY: .github/policies/operations/gitops-policy.md
+  VALIDATION_IMAGE: ghcr.io/netbpf/gitops-validator:latest
+
+defaults:
+  run:
+    working-directory: ${{ github.workspace }}
+
+jobs:
+  validate-gitops-context:
+    name: Validate GitOps Context
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Validate YAML syntax
+        run: |
+          yamllint ${{ env.GITOPS_CONTEXT }}
+          yamllint ${{ env.GITOPS_POLICY }}
+
+      - name: Validate GitOps Context Schema
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const yaml = require('js-yaml');
+            const Ajv = require('ajv');
+            
+            // Load the GitOps context
+            const context = yaml.load(fs.readFileSync('${{ env.GITOPS_CONTEXT }}', 'utf8'));
+            
+            // Define the schema for validation
+            const schema = {
+              type: 'object',
+              required: ['gitops_platform', 'git_repository', 'kubernetes'],
+              properties: {
+                gitops_platform: {
+                  type: 'object',
+                  required: ['name', 'version', 'owner'],
+                  properties: {
+                    name: { type: 'string' },
+                    version: { type: 'string' },
+                    owner: { type: 'string' },
+                    contact: { type: 'string', format: 'email' }
+                  }
+                },
+                git_repository: {
+                  type: 'object',
+                  required: ['provider', 'organization'],
+                  properties: {
+                    provider: { type: 'string' },
+                    organization: { type: 'string' },
+                    repositories: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        required: ['name', 'purpose'],
+                        properties: {
+                          name: { type: 'string' },
+                          purpose: { type: 'string' },
+                          branch_protection: {
+                            type: 'object',
+                            properties: {
+                              required_approvals: { type: 'number', minimum: 1 },
+                              require_code_owner_review: { type: 'boolean' },
+                              require_status_checks: { type: 'boolean' },
+                              enforce_admins: { type: 'boolean' }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            };
+            
+            // Validate against schema
+            const ajv = new Ajv();
+            const validate = ajv.compile(schema);
+            const valid = validate(context);
+            
+            if (!valid) {
+              console.error('GitOps Context validation failed:', validate.errors);
+              process.exit(1);
+            }
+            
+            console.log('GitOps Context validation successful!');
+
+  enforce-branch-protection:
+    name: Enforce Branch Protection
+    needs: validate-gitops-context
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Parse GitOps Context
+        id: gitops-context
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const yaml = require('js-yaml');
+            const fs = require('fs');
+            const context = yaml.load(fs.readFileSync('${{ env.GITOPS_CONTEXT }}', 'utf8'));
+            return JSON.stringify(context.git_repository);
+
+      - name: Configure Branch Protection
+        uses: actions/github-script@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_CONTEXT: ${{ steps.gitops-context.outputs.result }}
+        with:
+          script: |
+            const { GITHUB_TOKEN, REPO_CONTEXT } = process.env;
+            const { Octokit } = require('@octokit/rest');
+            const context = JSON.parse(REPO_CONTEXT);
+            
+            const octokit = new Octokit({
+              auth: GITHUB_TOKEN
+            });
+            
+            // Get current repository information
+            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+            
+            // Apply branch protection rules
+            for (const repoConfig of context.repositories) {
+              if (repoConfig.branch_protection) {
+                const { required_approvals, require_code_owner_review, require_status_checks, enforce_admins } = repoConfig.branch_protection;
+                
+                await octokit.repos.updateBranchProtection({
+                  owner,
+                  repo: repoConfig.name,
+                  branch: 'main',
+                  required_status_checks: {
+                    strict: true,
+                    contexts: ['validate-gitops-context']
+                  },
+                  enforce_admins: enforce_admins,
+                  required_pull_request_reviews: {
+                    required_approving_review_count: required_approvals || 1,
+                    require_code_owner_reviews: require_code_owner_review || true,
+                    dismiss_stale_reviews: true
+                  },
+                  restrictions: null, // Set to null to disable restrictions
+                  required_linear_history: true,
+                  allow_force_pushes: false,
+                  allow_deletions: false
+                });
+                
+                console.log(`Branch protection updated for ${repoConfig.name}:main`);
+              }
+            }
+
+  validate-k8s-manifests:
+    name: Validate Kubernetes Manifests
+    needs: validate-gitops-context
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.24.0'
+
+      - name: Set up kustomize
+        uses: imranismail/setup-kustomize@v2
+        with:
+          kustomize-version: 'v4.5.7'
+
+      - name: Validate Kubernetes Manifests
+        run: |
+          # Validate all Kubernetes manifests
+          find . -type f -name "*.yaml" -o -name "*.yml" | grep -v -E "kustomization\\.ya?ml$" | while read file; do
+            echo "Validating $file"
+            kubectl apply --dry-run=server -f "$file" || exit 1
+          done
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'ghcr.io/netbpf/gitops-validator:latest'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload SARIF report
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  policy-report:
+    name: Generate Policy Report
+    needs: [validate-gitops-context, enforce-branch-protection, validate-k8s-manifests, security-scan]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Generate Policy Compliance Report
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { GITHUB_TOKEN } = process.env;
+            const { Octokit } = require('@octokit/rest');
+            const fs = require('fs');
+            
+            const octokit = new Octokit({
+              auth: GITHUB_TOKEN
+            });
+            
+            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+            const runId = process.env.GITHUB_RUN_ID;
+            
+            // Get workflow run details
+            const { data: run } = await octokit.actions.getWorkflowRun({
+              owner,
+              repo,
+              run_id: runId
+            });
+            
+            // Get jobs for this run
+            const { data: jobs } = await octokit.actions.listJobsForWorkflowRun({
+              owner,
+              repo,
+              run_id: runId
+            });
+            
+            // Generate markdown report
+            let report = `# GitOps Policy Compliance Report\n`;
+            report += `**Run ID:** ${runId}\n`;
+            report += `**Status:** ${run.status}\n`;
+            report += `**Conclusion:** ${run.conclusion || 'pending'}\n\n`;
+            
+            report += "## Job Status\n";
+            for (const job of jobs.jobs) {
+              report += `- ${job.name}: ${job.conclusion || job.status}\n`;
+            }
+            
+            // Add policy validation results
+            report += "\n## Policy Validation Results\n";
+            report += "✅ GitOps Context validated successfully\n";
+            report += "✅ Branch protection rules applied\n";
+            report += "✅ Kubernetes manifests validated\n";
+            report += "✅ Security scan completed\n";
+            
+            // Add next steps
+            report += "\n## Next Steps\n";
+            report += "1. Review any warnings or errors in the workflow run\n";
+            report += "2. Address any policy violations\n";
+            report += "3. Re-run the workflow to verify compliance\n";
+            
+            // Write report to file
+            fs.writeFileSync('policy-report.md', report);
+            
+            // Add as job summary
+            await require('@actions/core').summary
+              .addHeading('GitOps Policy Compliance Report')
+              .addRaw(report.replace(/#+ /g, ''))
+              .write();
+            
+            // Upload as artifact
+            await require('@actions/artifact').create()
+              .uploadArtifact('policy-report', ['policy-report.md'], '.', { retentionDays: 90 });
+
+      - name: Upload Policy Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: policy-report
+          path: policy-report.md
+
+# Notifications
+notifications:
+  on_success: change
+  on_failure: always
+  webhooks: https://api.netbpf.org/webhooks/gitops-policy

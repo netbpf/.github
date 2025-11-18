@@ -1,0 +1,195 @@
+---
+# NETBPF GitOps Platform Context
+# This file defines the GitOps-specific context and configurations
+# for the NETBPF platform's GitOps implementation.
+
+# GitOps Platform Identity
+gitops_platform:
+  name: "NETBPF GitOps"
+  version: "1.0.0"
+  description: "GitOps implementation for NETBPF's cloud-native infrastructure"
+  owner: "NETBPF Platform Engineering"
+  contact: "gitops@netbpf.org"
+  status_page: "https://status.gitops.netbpf.org"
+
+# Git Repository Configuration
+git_repository:
+  provider: "GitHub"
+  organization: "netbpf"
+  repositories:
+    - name: "netbpf-gitops"
+      purpose: "Main GitOps repository for cluster configurations"
+      branch_protection:
+        required_approvals: 2
+        require_code_owner_review: true
+        require_status_checks: true
+        enforce_admins: true
+    - name: "netbpf-apps"
+      purpose: "Application deployments"
+
+# Kubernetes Cluster Configuration
+kubernetes:
+  cluster_management: "ArgoCD"
+  cluster_registry:
+    enabled: true
+    provider: "ArgoCD"
+  namespaces:
+    - name: "argocd"
+      purpose: "ArgoCD system components"
+    - name: "monitoring"
+      purpose: "Monitoring stack"
+    - name: "networking"
+      purpose: "Service mesh and networking components"
+    - name: "security"
+      purpose: "Security tooling"
+
+# GitOps Tooling
+tooling:
+  gitops_engine: "ArgoCD"
+  version: "v2.7.0"
+  configuration_management:
+    - name: "Kustomize"
+      version: "v4.5.7"
+    - name: "Helm"
+      version: "v3.11.0"
+  policy_engine: "OPA Gatekeeper"
+  secrets_management: "Sealed Secrets"
+  image_registry: "GitHub Container Registry (GHCR)"
+
+# Deployment Strategy
+deployment:
+  strategy: "Blue-Green"
+  auto_sync: true
+  prune: true
+  self_heal: true
+  sync_options:
+    - "PruneLast=true"
+    - "ApplyOutOfSyncOnly=true"
+  sync_wave_annotations: true
+
+# Environment Promotion
+environments:
+  - name: "development"
+    branch: "develop"
+    auto_deploy: true
+    sync_policy: "automated"
+    cluster: "dev-cluster"
+  - name: "staging"
+    branch: "staging"
+    auto_deploy: true
+    sync_policy: "automated"
+    requires_approval: true
+    cluster: "staging-cluster"
+  - name: "production"
+    branch: "main"
+    auto_deploy: false
+    sync_policy: "manual"
+    requires_approval: true
+    cluster: "prod-cluster"
+
+# Security & Compliance
+security:
+  rbac:
+    enabled: true
+    sso_provider: "GitHub"
+    admin_teams:
+      - "netbpf/platform-admins"
+    read_only_teams:
+      - "netbpf/developers"
+  network_policies:
+    enabled: true
+    default_deny: true
+  pod_security_policies:
+    enabled: true
+    profile: "restricted"
+  image_security:
+    scan_on_push: true
+    block_vulnerable: "high,critical"
+  secrets_management:
+    provider: "Sealed Secrets"
+    rotation_policy: "90d"
+
+# Monitoring & Observability
+monitoring:
+  argo_cd:
+    metrics: true
+    logging: true
+    tracing: true
+  alerts:
+    - name: "Sync Failed"
+      severity: "critical"
+    - name: "Health Degraded"
+      severity: "warning"
+  dashboards:
+    - name: "GitOps Overview"
+      url: "https://grafana.netbpf.org/d/gitops-overview"
+    - name: "Cluster Health"
+      url: "https://grafana.netbpf.org/d/cluster-health"
+
+# Backup & Disaster Recovery
+backup:
+  enabled: true
+  provider: "Velero"
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  retention: "30d"
+  include_resources:
+    - "applications"
+    - "appprojects"
+    - "applicationsets"
+  exclude_namespaces:
+    - "kube-system"
+    - "kube-public"
+
+# Compliance & Governance
+compliance:
+  policy_management: "OPA Gatekeeper"
+  policies:
+    - name: "required-labels"
+      enforcement: "deny"
+    - name: "resource-limits"
+      enforcement: "warn"
+    - name: "network-policy"
+      enforcement: "deny"
+  audit_logging: true
+  retention_days: 365
+
+# Notifications
+notifications:
+  providers:
+    - name: "slack"
+      type: "slack"
+      channel: "#gitops-alerts"
+    - name: "email"
+      type: "email"
+      recipients: "gitops-alerts@netbpf.org"
+  events:
+    - "OnSyncFailed"
+    - "OnOutOfSync"
+    - "OnDeletion"
+    - "OnOperationCompleted"
+
+# Performance Optimization
+performance:
+  cache:
+    enabled: true
+    ttl: "5m"
+  repo_server:
+    replicas: 2
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+  controller:
+    replicas: 2
+
+# Version Information
+version: 1.0.0
+last_updated: "2025-11-18T19:00:00Z"
+maintainers:
+  - "NETBPF GitOps Team <gitops@netbpf.org>"
+
+# Schema Validation
+$schema: "https://json-schema.org/draft/2020-12/schema"

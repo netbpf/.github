@@ -1,0 +1,387 @@
+name: Security Scanning
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "**" ]
+  schedule:
+    - cron: '0 0 * * 0' # Weekly on Sunday
+  workflow_dispatch:  # Allow manual triggering
+
+# Define environment variables for the workflow
+env:
+  GO_VERSION: '^1.21'
+  NODE_VERSION: '20.x'
+  PYTHON_VERSION: '3.10'
+  CONTAINER_SCAN: true
+  SECRET_SCANNING: true
+  SBOM_GENERATION: true
+
+jobs:
+  security-scan:
+    name: Run Security Scans
+    runs-on: ubuntu-latest
+    
+    # Define a matrix for different platforms if needed
+    strategy:
+      matrix:
+        platform: [ubuntu-latest]
+        # Uncomment to test on multiple platforms
+        # platform: [ubuntu-latest, macos-latest]
+      fail-fast: false
+      max-parallel: 3
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # Required for dependency scanning
+        # Fetch all history for all branches and tags
+        fetch-tags: true
+        submodules: 'recursive'  # Fetch submodules if any
+    
+    - name: Set up Go
+      if: contains(github.event.pull_request.labels.*.name, 'go') || contains(github.event.pull_request.labels.*.name, 'golang') || contains(github.event.pull_request.labels.*.name, 'all')
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        check-latest: true
+        cache: true
+        cache-dependency-path: |
+          **/go.sum
+          **/go.mod
+    
+    # Set up Python for security tools
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+        cache-dependency-path: |
+          **/requirements*.txt
+          **/setup.py
+          **/pyproject.toml
+    
+    - name: Set up Node.js
+      if: contains(github.event.pull_request.labels.*.name, 'javascript') || contains(github.event.pull_request.labels.*.name, 'typescript') || contains(github.event.pull_request.labels.*.name, 'node')
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18.x'
+        cache: 'npm'
+    
+    # BPF and Security Tooling
+    - name: Install Security Tools
+      run: |
+        # Install BPF tooling
+        sudo apt-get update
+        sudo apt-get install -y \
+          clang \
+          llvm \
+          libelf-dev \
+          libbpf-dev \
+          bpftool \
+          linux-tools-common \
+          linux-tools-$(uname -r) \
+          # Additional security tools
+          git-secrets \
+          shellcheck \
+          hadolint \
+          # Container security
+          docker \
+          podman \
+          skopeo \
+          # Network tools
+          nmap \
+          netcat \
+          tcpdump \
+          # Crypto tools
+          gpg \
+          openssl \
+          # System tools
+          jq \
+          yq \
+          curl \
+          wget
+        
+        # Install Python security tools
+        python -m pip install --upgrade pip
+        python -m pip install \
+          bandit \
+          safety \
+          trivy \
+          semgrep \
+          checkov \
+          git+https://github.com/awslabs/git-secrets.git
+        
+        # Install Go security tools
+        go install github.com/securego/gosec/v2/cmd/gosec@latest
+        go install github.com/google/osv-scanner/cmd/osv-scanner@latest
+        
+        # Add Go tools to PATH
+        echo "$HOME/go/bin" >> $GITHUB_PATH
+    
+    # SAST Scanning
+    - name: Run CodeQL Analysis
+      uses: github/codeql-action/analyze@v2
+      with:
+        category: "/language:go"
+        config-file: ./.github/codeql/codeql-config.yml
+        upload-database: true  # Enable SARIF upload for security alerts
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    # Run additional SAST tools
+    - name: Run Gosec Security Scanner
+      if: contains(github.event.pull_request.labels.*.name, 'go') || contains(github.event.pull_request.labels.*.name, 'golang') || contains(github.event.pull_request.labels.*.name, 'all')
+      run: |
+        gosec -fmt=json -out=results/gosec-results.json -exclude-dir=./vendor ./...
+      continue-on-error: true
+    
+    - name: Run Bandit Security Scanner
+      if: contains(github.event.pull_request.labels.*.name, 'python') || contains(github.event.pull_request.labels.*.name, 'all')
+      run: |
+        mkdir -p results
+        bandit -r . -f json -o results/bandit-results.json || true
+      continue-on-error: true
+    
+    - name: Run Semgrep
+      uses: returntocorp/semgrep-action@v1
+      with:
+        config: p/security-audit
+        output: results/semgrep-results.json
+        json: true
+      continue-on-error: true
+    
+    # Advanced Dependency Scanning
+    - name: Run Dependency Review
+      uses: actions/dependency-review-action@v3
+      with:
+        fail-on-severity: high
+        allow-licenses: |
+          MIT
+          Apache-2.0
+          BSD-2-Clause
+          BSD-3-Clause
+          ISC
+          Unlicense
+    
+    - name: Run OSV Scanner
+      run: |
+        osv-scanner --config .osv-scanner.toml --json-output results/osv-scan-results.json
+      continue-on-error: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Run Trivy Vulnerability Scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: '.'
+        format: 'sarif'
+        output: 'results/trivy-results.sarif'
+        severity: 'CRITICAL,HIGH'
+      continue-on-error: true
+    
+    # SBOM generation
+    - name: Generate SBOM
+      uses: advanced-security/sbom-action@main
+      with:
+        output-path: sbom.spdx
+    
+    # Advanced BPF Security Checks
+    - name: Run BPF Security Checks
+      run: |
+        mkdir -p results/bpf
+        
+        # System BPF Configuration Checks
+        echo "=== System BPF Configuration ===" > results/bpf/security-report.txt
+        sysctl -a 2>/dev/null | grep -E 'bpf|unprivileged' >> results/bpf/security-report.txt
+        
+        # Check for unprivileged BPF
+        if [ "$(sysctl -n kernel.unprivileged_bpf_disabled 2>/dev/null)" != "1" ]; then
+          echo "WARNING: kernel.unprivileged_bpf_disabled is not set to 1" | tee -a results/bpf/security-report.txt
+        fi
+        
+        # List loaded BPF programs
+        echo -e "\n=== Loaded BPF Programs ===" >> results/bpf/security-report.txt
+        sudo bpftool prog show 2>/dev/null >> results/bpf/security-report.txt || true
+        
+        # List BPF maps
+        echo -e "\n=== BPF Maps ===" >> results/bpf/security-report.txt
+        sudo bpftool map show 2>/dev/null >> results/bpf/security-report.txt || true
+        
+        # Check BPF JIT status
+        echo -e "\n=== BPF JIT Status ===" >> results/bpf/security-report.txt
+        cat /proc/sys/net/core/bpf_jit_enable 2>/dev/null >> results/bpf/security-report.txt || true
+        
+        # Check BPF LSM hooks
+        echo -e "\n=== BPF LSM Hooks ===" >> results/bpf/security-report.txt
+        grep -r "bpf_lsm_" /sys/kernel/security/lsm 2>/dev/null >> results/bpf/security-report.txt || true
+        
+        # Run BPF security scanner if available
+        if command -v bpftool &> /dev/null; then
+          echo -e "\n=== BPF Program Details ===" >> results/bpf/security-report.txt
+          sudo bpftool prog show --json | jq -r '.[] | "\(.name): type=\(.type) loaded_at=\(.loaded_at) tag=\(.tag[0:16])"' 2>/dev/null >> results/bpf/security-report.txt || true
+        fi
+        
+        # Check for eBPF security features
+        echo -e "\n=== eBPF Security Features ===" >> results/bpf/security-report.txt
+        echo "Kernel Version: $(uname -r)" >> results/bpf/security-report.txt
+        echo "BPF Type Format (BTF): $(ls -la /sys/kernel/btf/vmlinux 2>/dev/null && echo "Enabled" || echo "Disabled")" >> results/bpf/security-report.txt
+        
+        # Generate SBOM for BPF programs
+        echo -e "\n=== BPF Program SBOM ===" >> results/bpf/security-report.txt
+        find . -name "*.bpf.c" -o -name "*.bpf.h" | sort >> results/bpf/security-report.txt
+        
+        # Check for common BPF security issues
+        echo -e "\n=== BPF Security Checks ===" >> results/bpf/security-report.txt
+        
+        # Check for BPF program verification
+        if ! sudo bpftool prog show &> /dev/null; then
+          echo "WARNING: Cannot list BPF programs. Insufficient permissions?" >> results/bpf/security-report.txt
+        fi
+        
+        # Check for BPF LSM restrictions
+        if ! grep -q "bpf" /sys/kernel/security/lsm 2>/dev/null; then
+          echo "NOTE: BPF LSM not enabled. Consider enabling for enhanced security." >> results/bpf/security-report.txt
+        fi
+        
+        # Check for BPF JIT hardening
+        if [ "$(cat /proc/sys/net/core/bpf_jit_harden 2>/dev/null)" != "1" ]; then
+          echo "NOTE: BPF JIT hardening is not enabled. Consider setting net.core.bpf_jit_harden=1" >> results/bpf/security-report.txt
+        fi
+        
+        # Check for BPF kptr_restrict
+        if [ "$(cat /proc/sys/kernel/kptr_restrict 2>/dev/null)" != "2" ]; then
+          echo "NOTE: kptr_restrict is not set to 2. Consider setting kernel.kptr_restrict=2" >> results/bpf/security-report.txt
+        fi
+        
+        # Generate a summary of findings
+        echo -e "\n=== Security Summary ===" >> results/bpf/security-report.txt
+        echo "BPF Security Check completed at $(date)" >> results/bpf/security-report.txt
+        echo "Review the above output for any security-related warnings or notes." >> results/bpf/security-report.txt
+        
+        # Print a summary for the logs
+        echo "BPF Security Check Summary:"
+        grep -E 'WARNING:|NOTE:' results/bpf/security-report.txt || echo "No security issues found."
+    
+    # Process and Upload Results
+    - name: Process Scan Results
+      if: always()
+      run: |
+        # Create a summary report
+        echo "# Security Scan Summary" > results/security-summary.md
+        echo "## Scan completed at $(date)" >> results/security-summary.md
+        echo "### Repository: $GITHUB_REPOSITORY" >> results/security-summary.md
+        echo "### Commit: $GITHUB_SHA" >> results/security-summary.md
+        echo "\n## Scan Results" >> results/security-summary.md
+        
+        # Add BPF security check summary
+        if [ -f results/bpf/security-report.txt ]; then
+          echo "\n### BPF Security Check Summary" >> results/security-summary.md
+          grep -E 'WARNING:|NOTE:' results/bpf/security-report.txt >> results/security-summary.md || echo "No BPF security issues found." >> results/security-summary.md
+        fi
+        
+        # Count critical/high vulnerabilities from Trivy if available
+        if [ -f results/trivy-results.sarif ]; then
+          VULN_COUNT=$(jq -r '.runs[0].results | length' results/trivy-results.sarif 2>/dev/null || echo 0)
+          echo "\n### Container Vulnerabilities" >> results/security-summary.md
+          echo "Found $VULN_COUNT vulnerabilities in container images" >> results/security-summary.md
+        fi
+        
+        # Add dependency scan summary
+        if [ -f results/osv-scan-results.json ]; then
+          OSV_ISSUES=$(jq '.results | length' results/osv-scan-results.json 2>/dev/null || echo 0)
+          echo "\n### Dependency Vulnerabilities" >> results/security-summary.md
+          echo "Found $OSV_ISSUES vulnerable dependencies" >> results/security-summary.md
+        fi
+        
+        # Final status
+        echo "\n## Overall Status" >> results/security-summary.md
+        if [ "${{ job.status }}" = "success" ]; then
+          echo "✅ All security checks passed" >> results/security-summary.md
+        else
+          echo "❌ Some security checks failed. Please review the full report." >> results/security-summary.md
+        fi
+    
+    - name: Upload Security Scan Results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-scan-results
+        path: |
+          results/
+          sbom.spdx
+        retention-days: 7
+        if-no-files-found: warn
+    
+    - name: Upload SARIF Results
+      if: always()
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: results/trivy-results.sarif
+    
+    - name: Generate Security Dashboard
+      if: always()
+      uses: githubocto/flat@v3
+      with:
+        http_url: https://api.github.com/repos/${{ github.repository }}/code-scanning/codeql/analyses
+        authorization: ${{ secrets.GITHUB_TOKEN }}
+        downloaded_filename: codeql-analyses.json
+        output_path: results/codeql-analyses.json
+    
+    - name: Upload Security Dashboard
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-dashboard
+        path: results/codeql-analyses.json
+    
+    # Security Notifications
+    - name: Send Security Notification
+      if: always()
+      uses: rtCamp/action-slack-notify@v2
+      env:
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        SLACK_COLOR: ${{ job.status == 'success' && '#36a64f' || '#ff0000' }}
+        SLACK_TITLE: 'Security Scan ${{ job.status == 'success' && 'Passed' : 'Failed' }} for ${{ github.repository }}'
+        SLACK_MESSAGE: |
+          *Repository*: ${{ github.repository }}
+          *Branch*: ${{ github.ref_name }}
+          *Commit*: <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${GITHUB_SHA:0:8}>
+          *Workflow*: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|${{ github.workflow }}>
+          *Status*: ${{ job.status == 'success' && '✅ All checks passed' : '❌ Some checks failed' }}
+          
+          ${{ steps.security_summary.outputs.summary || 'No security summary available' }}
+        MSG_MINIMAL: false
+        SLACK_FOOTER: "Scan completed at $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+    
+    - name: Create Security Report
+      if: always()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('results/security-summary.md', 'utf8');
+          
+          // Create a check run with the security report
+          await github.rest.checks.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            name: 'Security Scan Report',
+            head_sha: context.sha,
+            status: 'completed',
+            conclusion: '${{ job.status }}',
+            output: {
+              title: 'Security Scan Results',
+              summary: report,
+              annotations: []
+            }
+          });
+    
+    # Security Gate
+    - name: Fail on Critical Vulnerabilities
+      if: contains(needs.*.result, 'failure') && github.event_name == 'pull_request'
+      run: |
+        echo "Critical vulnerabilities found. Failing the build."
+        exit 1
